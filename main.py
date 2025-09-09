@@ -744,9 +744,9 @@ def main():
         handle_order_text
     ))
     
-    # Запускаем бота
+    # Запускаем бота для Railway
     logger.info("🚀 Запуск бота @alyx_design_bot...")
-    application.run_polling(allowed_updates=["message", "callback_query"])
+    application.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
     main()
