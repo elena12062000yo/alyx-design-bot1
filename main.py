@@ -1,8 +1,13 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
+"""
+Telegram бот @alyx_design_bot с улучшенным admin функционалом
+"""
+
 import logging
-from datetime import datetime, timedelta
+import json
+from datetime import datetime
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes
 from typing import Dict, List
@@ -10,7 +15,11 @@ from typing import Dict, List
 # Настройка логирования
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
+    level=logging.INFO,
+    handlers=[
+        logging.FileHandler('bot.log', encoding='utf-8'),
+        logging.StreamHandler()
+    ]
 )
 logger = logging.getLogger(__name__)
 
@@ -19,52 +28,78 @@ BOT_TOKEN = "8307209669:AAFl5JKEBUPkJ8akr01RfXKwvLTNEoQPLqQ"
 OWNER_ID = 1014948227
 WEBSITE_URL = "https://www.alyxbabysitter.ru"
 
-# Простая база данных
+# База данных в памяти
 class Database:
     def __init__(self):
         self.users: Dict[int, dict] = {}
         self.orders: List[dict] = []
-        self.subscribers: List[int] = []
+        self.first_time_users: List[int] = []  # Для отслеживания новых пользователей
     
     def add_user(self, user_id: int, user_data: dict):
+        """Добавить пользователя"""
+        is_new_user = user_id not in self.users
+        
         self.users[user_id] = {
             'id': user_id,
             'first_name': user_data.get('first_name', ''),
             'username': user_data.get('username', ''),
-            'joined_at': datetime.now()
+            'joined_at': datetime.now(),
+            'last_seen': datetime.now(),
+            'is_new': is_new_user
         }
+        
+        if is_new_user:
+            self.first_time_users.append(user_id)
+        
+        return is_new_user
     
-    def add_order(self, order_data: dict):
-        order_data['id'] = len(self.orders) + 1
-        order_data['created_at'] = datetime.now()
-        self.orders.append(order_data)
-        return order_data['id']
+    def update_last_seen(self, user_id: int):
+        """Обновить время последнего визита"""
+        if user_id in self.users:
+            self.users[user_id]['last_seen'] = datetime.now()
     
-    def subscribe_user(self, user_id: int):
-        if user_id not in self.subscribers:
-            self.subscribers.append(user_id)
+    def get_stats(self):
+        """Получить статистику"""
+        total_users = len(self.users)
+        new_users_today = len([u for u in self.users.values() 
+                              if u['joined_at'].date() == datetime.now().date()])
+        return {
+            'total_users': total_users,
+            'new_users_today': new_users_today,
+            'orders': len(self.orders)
+        }
 
+# Инициализация базы данных
 db = Database()
 
-# Тексты сообщений
+# Сообщения бота
 MESSAGES = {
-    'start': """🎨 <b>Добро пожаловать в мир AI-дизайна!</b>
+    'welcome_new_user': """🎉 <b>Добро пожаловать!</b>
 
-Я Alyx Babysitter — AI-дизайнер, создаю:
-• 🤖 Цифровые двойники
-• 📸 AI-фотосессии  
-• 🎬 Видео-сниппеты
-• 🎨 Обложки и дизайн
-• 💼 Коммерческие съемки
+Я бот AI-дизайнера <b>Alyx Babysitter</b>!
 
-<i>Быстро, чисто и системно.</i>
+Здесь вы можете:
+• Посмотреть портфолио
+• Узнать о услугах и ценах  
+• Оформить заказ
+• Связаться со мной
 
-🌐 Сайт: www.alyxbabysitter.ru
-📱 Telegram: @alyx_babysitter""",
+Нажмите кнопку <b>"🚀 Start"</b> чтобы начать!""",
 
-    'portfolio': """🎨 <b>Мое портфолио</b>
+    'start': """🎨 <b>AI Designer Alyx Babysitter</b>
 
-Посмотрите мои работы:
+Создаю уникальные визуалы с помощью ИИ:
+• Цифровые двойники артистов
+• AI-фотосессии и портреты
+• Кинематографичные сниппеты
+• Дизайн обложек релизов
+
+Выберите нужный раздел ниже 👇""",
+
+    'portfolio': """🎨 <b>Портфолио</b>
+
+Посмотрите мои работы на сайте или выберите категорию:
+
 • AI-портреты в стиле Y2K/трэп
 • Реалистичные цифровые двойники артистов
 • AI-фотосессии для брендов
@@ -93,23 +128,19 @@ MESSAGES = {
 
 💼 <b>Коммерческая съемка</b>
 От 8,000₽ | 5-7 дней
-Рекламные визуалы для бизнеса""",
+Рекламные визуалы для бизнеса
+
+📞 Для заказа нажмите "Оформить заказ" ниже""",
 
     'contact': """📞 <b>Контакты</b>
 
-🎯 <b>Готовы начать проект?</b>
+Связаться со мной можно несколькими способами:
 
-📱 <b>Telegram:</b> @alyx_babysitter
+💬 <b>Telegram:</b> @alyx_babysitter
 🌐 <b>Сайт:</b> www.alyxbabysitter.ru
-⏰ <b>Время работы:</b> 10:00 - 22:00 MSK
+📧 <b>Email по запросу</b>
 
-🚀 <b>Как происходит работа:</b>
-1. Обсуждаем задачу и бюджет
-2. Заключаем договор, 50% предоплата  
-3. Выполняю работу с промежуточными показами
-4. Финальная приемка и доплата
-
-⚡ <i>Обычно отвечаю в течение 30 минут!</i>""",
+Обычно отвечаю в течение 2-3 часов ⚡""",
 
     'about': """ℹ️ <b>О дизайнере</b>
 
@@ -125,47 +156,62 @@ AI-дизайнер и визуальный артист
 💼 <b>Опыт работы:</b>
 • 100+ проектов выполнено
 • Работа с артистами и лейблами
-• Коммерческие проекты для брендов
-
-📱 Telegram: @alyx_babysitter"""
+• Коммерческие проекты для брендов"""
 }
 
 # Клавиатуры
-def get_main_keyboard():
+def get_welcome_keyboard():
+    """Клавиатура для нового пользователя"""
     keyboard = [
-        [
-            InlineKeyboardButton("🎨 Портфолио", callback_data="portfolio"),
-            InlineKeyboardButton("💎 Услуги", callback_data="services")
-        ],
-        [
-            InlineKeyboardButton("📞 Контакты", callback_data="contact"),
-            InlineKeyboardButton("ℹ️ О дизайнере", callback_data="about")
-        ],
-        [
-            InlineKeyboardButton("🌐 Открыть сайт", url=WEBSITE_URL)
-        ],
-        [
-            InlineKeyboardButton("🔔 Подписаться на новости", callback_data="subscribe")
-        ]
+        [InlineKeyboardButton("🚀 Start", callback_data="start_bot")]
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
+def get_main_keyboard():
+    """Основная клавиатура"""
+    keyboard = [
+        [InlineKeyboardButton("🎨 Портфолио", callback_data="portfolio"),
+         InlineKeyboardButton("💎 Услуги", callback_data="services")],
+        [InlineKeyboardButton("📞 Контакты", callback_data="contact"),
+         InlineKeyboardButton("ℹ️ О дизайнере", callback_data="about")],
+        [InlineKeyboardButton("📋 Оформить заказ", url="https://t.me/alyx_babysitter")],
+        [InlineKeyboardButton("🌐 Открыть сайт", url=WEBSITE_URL)]
     ]
     return InlineKeyboardMarkup(keyboard)
 
 def get_back_keyboard():
-    keyboard = [[InlineKeyboardButton("🔙 Назад", callback_data="back_to_main")]]
+    """Клавиатура с кнопкой назад"""
+    keyboard = [
+        [InlineKeyboardButton("🔙 Назад в меню", callback_data="back_to_main")]
+    ]
     return InlineKeyboardMarkup(keyboard)
 
 # Обработчики команд
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработка команды /start"""
     user = update.effective_user
-    db.add_user(user.id, user.to_dict())
+    is_new_user = db.add_user(user.id, user.to_dict())
     
-    await update.message.reply_text(
-        MESSAGES['start'],
-        parse_mode='HTML',
-        reply_markup=get_main_keyboard()
-    )
+    if is_new_user:
+        # Приветствие для нового пользователя
+        await update.message.reply_text(
+            MESSAGES['welcome_new_user'],
+            parse_mode='HTML',
+            reply_markup=get_welcome_keyboard()
+        )
+    else:
+        # Обычное меню для существующих пользователей
+        await update.message.reply_text(
+            MESSAGES['start'],
+            parse_mode='HTML',
+            reply_markup=get_main_keyboard()
+        )
 
 async def portfolio_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработка команды /portfolio"""
+    user_id = update.effective_user.id
+    db.update_last_seen(user_id)
+    
     await update.message.reply_text(
         MESSAGES['portfolio'],
         parse_mode='HTML',
@@ -173,149 +219,211 @@ async def portfolio_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def services_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    keyboard = [
-        [InlineKeyboardButton("📋 Заказать услугу", url="https://t.me/alyx_babysitter")],
-        [InlineKeyboardButton("🔙 Назад", callback_data="back_to_main")]
-    ]
+    """Обработка команды /services"""
+    user_id = update.effective_user.id
+    db.update_last_seen(user_id)
     
     await update.message.reply_text(
         MESSAGES['services'],
         parse_mode='HTML',
-        reply_markup=InlineKeyboardMarkup(keyboard)
+        reply_markup=get_back_keyboard()
     )
 
 async def contact_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    keyboard = [
-        [InlineKeyboardButton("💬 Написать @alyx_babysitter", url="https://t.me/alyx_babysitter")],
-        [InlineKeyboardButton("🌐 Открыть сайт", url=WEBSITE_URL)],
-        [InlineKeyboardButton("🔙 Назад", callback_data="back_to_main")]
-    ]
+    """Обработка команды /contact"""
+    user_id = update.effective_user.id
+    db.update_last_seen(user_id)
     
     await update.message.reply_text(
         MESSAGES['contact'],
         parse_mode='HTML',
-        reply_markup=InlineKeyboardMarkup(keyboard)
+        reply_markup=get_back_keyboard()
     )
 
 async def about_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    keyboard = [
-        [InlineKeyboardButton("📱 Написать в Telegram", url="https://t.me/alyx_babysitter")],
-        [InlineKeyboardButton("🌐 Посмотреть портфолио", url=WEBSITE_URL)],
-        [InlineKeyboardButton("🔙 Назад", callback_data="back_to_main")]
-    ]
+    """Обработка команды /about"""
+    user_id = update.effective_user.id
+    db.update_last_seen(user_id)
     
     await update.message.reply_text(
         MESSAGES['about'],
         parse_mode='HTML',
-        reply_markup=InlineKeyboardMarkup(keyboard)
+        reply_markup=get_back_keyboard()
     )
 
-# Обработчик callback запросов
+async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Команда статистики (только для владельца)"""
+    user_id = update.effective_user.id
+    
+    if user_id != OWNER_ID:
+        await update.message.reply_text("❌ У вас нет доступа к этой команде")
+        return
+    
+    stats = db.get_stats()
+    stats_text = f"""📊 <b>Статистика бота</b>
+
+👥 Всего пользователей: {stats['total_users']}
+🆕 Новых за сегодня: {stats['new_users_today']}
+📋 Всего заказов: {stats['orders']}
+
+📅 Последнее обновление: {datetime.now().strftime('%d.%m.%Y %H:%M')}"""
+    
+    await update.message.reply_text(stats_text, parse_mode='HTML')
+
+async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Команда рассылки (только для владельца)"""
+    user_id = update.effective_user.id
+    
+    if user_id != OWNER_ID:
+        await update.message.reply_text("❌ У вас нет доступа к этой команде")
+        return
+    
+    # Получаем текст сообщения
+    message_text = ' '.join(context.args)
+    
+    if not message_text:
+        await update.message.reply_text(
+            """📢 <b>Система рассылки</b>
+
+Использование: /broadcast [сообщение]
+
+Пример:
+/broadcast Привет! У меня новые работы на сайте!
+
+Сообщение будет отправлено всем пользователям бота.""",
+            parse_mode='HTML'
+        )
+        return
+    
+    # Отправляем рассылку
+    sent_count = 0
+    failed_count = 0
+    
+    for user_id in db.users:
+        try:
+            await context.bot.send_message(
+                chat_id=user_id,
+                text=f"📢 <b>Сообщение от Alyx:</b>\n\n{message_text}",
+                parse_mode='HTML'
+            )
+            sent_count += 1
+        except Exception as e:
+            failed_count += 1
+            logger.error(f"Не удалось отправить сообщение пользователю {user_id}: {e}")
+    
+    # Отчет о рассылке
+    await update.message.reply_text(
+        f"""✅ <b>Рассылка завершена</b>
+
+📨 Отправлено: {sent_count}
+❌ Ошибок: {failed_count}
+👥 Всего пользователей: {len(db.users)}""",
+        parse_mode='HTML'
+    )
+
+async def admin_help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Справка по admin командам"""
+    user_id = update.effective_user.id
+    
+    if user_id != OWNER_ID:
+        await update.message.reply_text("❌ У вас нет доступа к этой команде")
+        return
+    
+    help_text = """👑 <b>Admin команды</b>
+
+📊 /stats - Статистика пользователей
+📢 /broadcast [текст] - Рассылка сообщения всем пользователям
+❓ /admin_help - Эта справка
+
+<b>Примеры использования:</b>
+
+<code>/broadcast Привет! Новые работы на сайте!</code>
+<code>/stats</code>
+
+<b>Автоматические функции:</b>
+• Новые пользователи получают приветственное сообщение
+• Статистика обновляется автоматически
+• Логирование всех действий в bot.log"""
+    
+    await update.message.reply_text(help_text, parse_mode='HTML')
+
+# Обработчик callback кнопок
 async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработка нажатий на кнопки"""
     query = update.callback_query
+    user_id = query.from_user.id
+    
     await query.answer()
+    db.update_last_seen(user_id)
     
-    data = query.data
-    
-    if data == "back_to_main":
+    if query.data == "start_bot":
+        # Переход от приветствия к основному меню
         await query.edit_message_text(
             MESSAGES['start'],
             parse_mode='HTML',
             reply_markup=get_main_keyboard()
         )
     
-    elif data == "portfolio":
+    elif query.data == "portfolio":
         await query.edit_message_text(
             MESSAGES['portfolio'],
             parse_mode='HTML',
             reply_markup=get_back_keyboard()
         )
     
-    elif data == "services":
-        keyboard = [
-            [InlineKeyboardButton("📋 Заказать услугу", url="https://t.me/alyx_babysitter")],
-            [InlineKeyboardButton("🔙 Назад", callback_data="back_to_main")]
-        ]
-        
+    elif query.data == "services":
         await query.edit_message_text(
             MESSAGES['services'],
             parse_mode='HTML',
-            reply_markup=InlineKeyboardMarkup(keyboard)
+            reply_markup=get_back_keyboard()
         )
     
-    elif data == "contact":
-        keyboard = [
-            [InlineKeyboardButton("💬 Написать @alyx_babysitter", url="https://t.me/alyx_babysitter")],
-            [InlineKeyboardButton("🌐 Открыть сайт", url=WEBSITE_URL)],
-            [InlineKeyboardButton("🔙 Назад", callback_data="back_to_main")]
-        ]
-        
+    elif query.data == "contact":
         await query.edit_message_text(
             MESSAGES['contact'],
             parse_mode='HTML',
-            reply_markup=InlineKeyboardMarkup(keyboard)
+            reply_markup=get_back_keyboard()
         )
     
-    elif data == "about":
-        keyboard = [
-            [InlineKeyboardButton("📱 Написать в Telegram", url="https://t.me/alyx_babysitter")],
-            [InlineKeyboardButton("🌐 Посмотреть портфолио", url=WEBSITE_URL)],
-            [InlineKeyboardButton("🔙 Назад", callback_data="back_to_main")]
-        ]
-        
+    elif query.data == "about":
         await query.edit_message_text(
             MESSAGES['about'],
             parse_mode='HTML',
-            reply_markup=InlineKeyboardMarkup(keyboard)
-        )
-    
-    elif data == "subscribe":
-        user_id = query.from_user.id
-        db.subscribe_user(user_id)
-        
-        await query.edit_message_text(
-            "🔔 <b>Подписка активирована!</b>\n\nТеперь вы будете получать уведомления о новых работах.\n\n💬 Для заказов пишите: @alyx_babysitter",
-            parse_mode='HTML',
             reply_markup=get_back_keyboard()
         )
-
-# Команда статистики для владельца
-async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != OWNER_ID:
-        await update.message.reply_text("❌ У вас нет прав для использования этой команды.")
-        return
     
-    total_users = len(db.users)
-    total_subscribers = len(db.subscribers)
-    
-    stats_message = f"""📊 <b>Статистика бота</b>
-
-👥 <b>Пользователи:</b> {total_users}
-🔔 <b>Подписчиков:</b> {total_subscribers}
-
-⏰ <b>Обновлено:</b> {datetime.now().strftime('%d.%m.%Y %H:%M')}"""
-    
-    await update.message.reply_text(stats_message, parse_mode='HTML')
+    elif query.data == "back_to_main":
+        await query.edit_message_text(
+            MESSAGES['start'],
+            parse_mode='HTML',
+            reply_markup=get_main_keyboard()
+        )
 
 def main():
     """Основная функция запуска бота"""
     
+    # Создаем приложение
     application = Application.builder().token(BOT_TOKEN).build()
     
-    # Обработчики команд
+    # Добавляем обработчики команд
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("portfolio", portfolio_command))
     application.add_handler(CommandHandler("services", services_command))
     application.add_handler(CommandHandler("contact", contact_command))
     application.add_handler(CommandHandler("about", about_command))
+    
+    # Admin команды
     application.add_handler(CommandHandler("stats", stats_command))
+    application.add_handler(CommandHandler("broadcast", broadcast_command))
+    application.add_handler(CommandHandler("admin_help", admin_help_command))
     
     # Обработчик callback кнопок
     application.add_handler(CallbackQueryHandler(callback_handler))
     
     # Запускаем бота
-    logger.info("🚀 Запуск упрощенного бота @alyx_design_bot...")
+    logger.info("🚀 Запуск бота @alyx_design_bot с admin функциями...")
     application.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
     main()
+
